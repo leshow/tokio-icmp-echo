@@ -31,4 +31,4 @@ mod ping;
 mod socket;
 
 pub use errors::Error;
-pub use ping::{PingChain, PingChainStream, PingFuture, Pinger};
+pub use ping::{PingChain, Pinger};

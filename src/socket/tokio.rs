@@ -1,120 +1,53 @@
 use std::io;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use socket2::{Domain, Protocol, SockAddr, Type};
-use std::future::Future;
 use std::net::SocketAddr;
 use tokio::io::unix::AsyncFd;
 
 use super::mio;
 
-#[derive(Clone)]
 pub struct Socket {
-    socket: Arc<AsyncFd<mio::Socket>>,
+    socket: AsyncFd<mio::Socket>,
 }
 
 impl Socket {
     pub fn new(domain: Domain, type_: Type, protocol: Protocol) -> io::Result<Self> {
         let socket = mio::Socket::new(domain, type_, protocol)?;
         let socket = AsyncFd::new(socket)?;
-        Ok(Self {
-            socket: Arc::new(socket),
-        })
+        Ok(Self { socket })
     }
 
-    pub fn send_to<T>(&self, buf: T, target: &SocketAddr) -> Send<T>
+    pub async fn send_to<T>(&self, buf: T, target: SocketAddr) -> io::Result<()>
     where
         T: AsRef<[u8]>,
     {
-        Send {
-            state: SendState::Writing {
-                socket: self.socket.clone(),
-                addr: target.clone().into(),
-                buf,
-            },
+        let n = loop {
+            let mut guard = self.socket.writable().await?;
+            match guard.try_io(|inner| {
+                inner
+                    .get_ref()
+                    .send_to(buf.as_ref(), &SockAddr::from(target))
+            }) {
+                Ok(res) => break res?,
+                Err(_would_block) => continue,
+            }
+        };
+        if n != buf.as_ref().len() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "failed to send entire packet",
+            ));
         }
+        Ok(())
     }
 
-    pub fn recv(&self, buffer: &mut [u8], cx: &mut Context<'_>) -> Poll<Result<usize, io::Error>> {
+    pub async fn recv(&self, buf: &mut [u8]) -> Result<usize, io::Error> {
         loop {
-            match self.socket.poll_read_ready(cx) {
-                Poll::Ready(Ok(mut guard)) => match guard.try_io(|fd| fd.get_ref().recv(buffer)) {
-                    Ok(res) => return Poll::Ready(res),
-                    Err(_) => continue,
-                },
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => return Poll::Pending,
+            let mut guard = self.socket.readable().await?;
+            match guard.try_io(|inner| inner.get_ref().recv(buf)) {
+                Ok(res) => return res,
+                Err(_would_block) => continue,
             }
-        }
-    }
-}
-
-pub struct Send<T> {
-    state: SendState<T>,
-}
-
-enum SendState<T> {
-    Writing {
-        socket: Arc<AsyncFd<mio::Socket>>,
-        buf: T,
-        addr: SockAddr,
-    },
-    Empty,
-}
-
-fn send_to(
-    socket: &Arc<AsyncFd<mio::Socket>>,
-    buf: &[u8],
-    target: &SockAddr,
-    cx: &mut Context<'_>,
-) -> Poll<Result<usize, io::Error>> {
-    loop {
-        match socket.poll_write_ready(cx) {
-            Poll::Ready(Ok(mut guard)) => {
-                match guard.try_io(|fd| fd.get_ref().send_to(buf, target)) {
-                    Ok(res) => return Poll::Ready(res),
-                    Err(_) => continue,
-                }
-            }
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-            Poll::Pending => return Poll::Pending,
-        }
-    }
-}
-
-impl<T> Future for Send<T>
-where
-    T: AsRef<[u8]> + Unpin,
-{
-    type Output = Result<(), io::Error>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.state {
-            SendState::Writing {
-                ref socket,
-                ref buf,
-                ref addr,
-            } => {
-                let n = match send_to(socket, buf.as_ref(), addr, cx) {
-                    Poll::Ready(Ok(n)) => n,
-                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                    Poll::Pending => return Poll::Pending,
-                };
-                if n != buf.as_ref().len() {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        "failed to send entire packet",
-                    )));
-                }
-            }
-            SendState::Empty => panic!("poll a Send after it's done"),
-        }
-
-        match ::std::mem::replace(&mut self.state, SendState::Empty) {
-            SendState::Writing { .. } => Poll::Ready(Ok(())),
-            SendState::Empty => unreachable!(),
         }
     }
 }

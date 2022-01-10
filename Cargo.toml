@@ -19,6 +19,13 @@ socket2 = { version = "0.4", features = ["all"] }
 tokio = { version = "1.5", features = ["rt", "time", "net"] }
 parking_lot = "0.11"
 thiserror = "1"
+async-stream = "0.3"
+tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1.5", features = ["rt-multi-thread", "time", "macros"] }
+tracing-test = "0.1"
+
+[[example]]
+name = "simple"
+path = "examples/simple.rs"
