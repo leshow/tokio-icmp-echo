@@ -1,15 +1,10 @@
-extern crate futures;
-extern crate tokio;
-
-extern crate tokio_icmp_echo;
-
-use crate::futures::{future, StreamExt};
+use futures::{future, StreamExt};
 
 #[tokio::main]
 async fn main() {
     let addr = std::env::args().nth(1).unwrap().parse().unwrap();
 
-    let pinger = tokio_icmp_echo::Pinger::new().await.unwrap();
+    let pinger = tokio_icmp_echo::Pinger::dgram().unwrap();
     let stream = pinger.chain(addr).stream();
     stream
         .take(3)

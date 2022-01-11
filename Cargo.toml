@@ -2,13 +2,13 @@
 name = "tokio-icmp-echo"
 version = "0.4.0"
 license = "MIT/Apache-2.0"
-authors = ["Fedor Gogolev <knsd@knsd.net>", "Jan Christian Grünhage <jan.christian@gruenhage.xyz"]
-documentation = "https://docs.rs/tokio-icmp-echo"
-repository = "https://github.com/jcgruenhage/tokio-icmp-echo"
+authors = ["Fedor Gogolev <knsd@knsd.net>", "Jan Christian Grünhage <jan.christian@gruenhage.xyz", "Evan Cameron <cameron.evan@gmail.com>"]
+# documentation = "https://docs.rs/tokio-icmp-echo"
+repository = "https://github.com/leshow/tokio-icmp-echo"
 description = "Asynchronous ICMP pinging library"
 keywords = ["tokio", "icmp", "ping"]
 categories = ["network-programming", "asynchronous"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 futures = "0.3"

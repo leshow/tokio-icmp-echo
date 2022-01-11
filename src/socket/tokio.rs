@@ -31,7 +31,7 @@ impl Socket {
         Send {
             state: SendState::Writing {
                 socket: self.socket.clone(),
-                addr: target.clone().into(),
+                addr: (*target).into(),
                 buf,
             },
         }

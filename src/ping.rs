@@ -16,10 +16,10 @@ use socket2::{Domain, Protocol, Type};
 
 use tokio::time::{sleep_until, Sleep};
 
-use crate::Error;
 use crate::packet::{EchoReply, EchoRequest, IcmpV4, IcmpV6, ICMP_HEADER_SIZE};
 use crate::packet::{IpV4Packet, IpV4Protocol};
 use crate::socket::{Send, Socket};
+use crate::Error;
 
 const DEFAULT_TIMEOUT: u64 = 2;
 const TOKEN_SIZE: usize = 24;
@@ -81,9 +81,7 @@ impl Future for PingFuture {
                     match Pin::new(send).poll(cx) {
                         Poll::Pending => (),
                         Poll::Ready(Ok(_)) => swap_send = true,
-                        Poll::Ready(Err(_)) => {
-                            return Poll::Ready(Err(Error::InternalError))
-                        }
+                        Poll::Ready(Err(_)) => return Poll::Ready(Err(Error::InternalError)),
                     }
                 }
 
@@ -96,9 +94,7 @@ impl Future for PingFuture {
                     Poll::Ready(Ok(stop_time)) => {
                         return Poll::Ready(Ok(Some(stop_time - normal.start_time)))
                     }
-                    Poll::Ready(Err(_)) => {
-                        return Poll::Ready(Err(Error::InternalError))
-                    }
+                    Poll::Ready(Err(_)) => return Poll::Ready(Err(Error::InternalError)),
                 }
 
                 match normal.sleep.as_mut().poll(cx) {
@@ -106,12 +102,8 @@ impl Future for PingFuture {
                     Poll::Ready(_) => return Poll::Ready(Ok(None)),
                 }
             }
-            PingFutureKind::InvalidProtocol => {
-                return Poll::Ready(Err(Error::InvalidProtocol))
-            }
-            PingFutureKind::PacketEncodeError => {
-                return Poll::Ready(Err(Error::InternalError))
-            }
+            PingFutureKind::InvalidProtocol => return Poll::Ready(Err(Error::InvalidProtocol)),
+            PingFutureKind::PacketEncodeError => return Poll::Ready(Err(Error::InternalError)),
         }
         Poll::Pending
     }
@@ -261,9 +253,10 @@ enum Sockets {
 }
 
 impl Sockets {
-    fn new() -> io::Result<Self> {
-        let mb_v4socket = Socket::new(Domain::IPV4, Type::RAW, Protocol::ICMPV4);
-        let mb_v6socket = Socket::new(Domain::IPV6, Type::RAW, Protocol::ICMPV6);
+    fn unprivileged() -> io::Result<Self> {
+        let mb_v4socket = Socket::new(Domain::IPV4, Type::DGRAM, Protocol::ICMPV4);
+        let mb_v6socket = Socket::new(Domain::IPV6, Type::DGRAM, Protocol::ICMPV6);
+
         match (mb_v4socket, mb_v6socket) {
             (Ok(v4_socket), Ok(v6_socket)) => Ok(Sockets::Both {
                 v4: v4_socket,
@@ -274,7 +267,20 @@ impl Sockets {
             (Err(err), Err(_)) => Err(err),
         }
     }
+    fn privileged() -> io::Result<Self> {
+        let mb_v4socket = Socket::new(Domain::IPV4, Type::RAW, Protocol::ICMPV4);
+        let mb_v6socket = Socket::new(Domain::IPV6, Type::RAW, Protocol::ICMPV6);
 
+        match (mb_v4socket, mb_v6socket) {
+            (Ok(v4_socket), Ok(v6_socket)) => Ok(Sockets::Both {
+                v4: v4_socket,
+                v6: v6_socket,
+            }),
+            (Ok(v4_socket), Err(_)) => Ok(Sockets::V4(v4_socket)),
+            (Err(_), Ok(v6_socket)) => Ok(Sockets::V6(v6_socket)),
+            (Err(err), Err(_)) => Err(err),
+        }
+    }
     fn v4(&self) -> Option<&Socket> {
         match *self {
             Sockets::V4(ref socket) => Some(socket),
@@ -293,15 +299,21 @@ impl Sockets {
 }
 
 impl Pinger {
-    /// Create new `Pinger` instance, will fail if unable to create both IPv4 and IPv6 sockets.
-    pub async fn new() -> Result<Self, Error> {
-        let sockets = Sockets::new()?;
+    /// Create new `Pinger` instance using DGRAM type, this can be run unprivileged.
+    /// Will fail if unable to create both IPv4 and IPv6 sockets.
+    pub fn new() -> Result<Self, Error> {
+        Self::dgram()
+    }
+    /// Create new `Pinger` instance using DGRAM type, this can be run unprivileged.
+    /// Will fail if unable to create both IPv4 and IPv6 sockets.
+    pub fn dgram() -> Result<Self, Error> {
+        let sockets = Sockets::unprivileged()?;
 
         let state = PingState::new();
 
         let v4_finalize = if let Some(v4_socket) = sockets.v4() {
             let (s, r) = oneshot::channel();
-            let receiver = Receiver::<IcmpV4>::new(v4_socket.clone(), state.clone());
+            let receiver = Receiver::<IcmpV4>::new(false, v4_socket.clone(), state.clone());
             tokio::spawn(select(receiver, r).map(|_| ()));
             Some(s)
         } else {
@@ -310,7 +322,44 @@ impl Pinger {
 
         let v6_finalize = if let Some(v6_socket) = sockets.v6() {
             let (s, r) = oneshot::channel();
-            let receiver = Receiver::<IcmpV6>::new(v6_socket.clone(), state.clone());
+            let receiver = Receiver::<IcmpV6>::new(false, v6_socket.clone(), state.clone());
+            tokio::spawn(select(receiver, r).map(|_| ()));
+            Some(s)
+        } else {
+            None
+        };
+
+        let inner = PingInner {
+            sockets,
+            state,
+            _v4_finalize: v4_finalize,
+            _v6_finalize: v6_finalize,
+        };
+
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+
+    /// Create new `Pinger` instance using RAW sockets, this requires privileges to run.
+    /// Will fail if unable to create both IPv4 and IPv6 sockets.
+    pub fn raw() -> Result<Self, Error> {
+        let sockets = Sockets::privileged()?;
+
+        let state = PingState::new();
+
+        let v4_finalize = if let Some(v4_socket) = sockets.v4() {
+            let (s, r) = oneshot::channel();
+            let receiver = Receiver::<IcmpV4>::new(true, v4_socket.clone(), state.clone());
+            tokio::spawn(select(receiver, r).map(|_| ()));
+            Some(s)
+        } else {
+            None
+        };
+
+        let v6_finalize = if let Some(v6_socket) = sockets.v6() {
+            let (s, r) = oneshot::channel();
+            let receiver = Receiver::<IcmpV6>::new(true, v6_socket.clone(), state.clone());
             tokio::spawn(select(receiver, r).map(|_| ()));
             Some(s)
         } else {
@@ -381,7 +430,7 @@ impl Pinger {
             }
         };
 
-        if let Err(_) = encode_result {
+        if encode_result.is_err() {
             return PingFuture {
                 inner: PingFutureKind::PacketEncodeError,
             };
@@ -404,31 +453,39 @@ impl Pinger {
 
 struct Receiver<Message> {
     socket: Socket,
+    privileged: bool,
     state: PingState,
     _phantom: ::std::marker::PhantomData<Message>,
 }
 
 trait ParseReply {
-    fn reply_payload(data: &[u8]) -> Option<&[u8]>;
+    fn reply_payload(privileged: bool, data: &[u8]) -> Option<&[u8]>;
 }
 
 impl ParseReply for IcmpV4 {
-    fn reply_payload(data: &[u8]) -> Option<&[u8]> {
-        if let Ok(ipv4_packet) = IpV4Packet::decode(data) {
-            if ipv4_packet.protocol != IpV4Protocol::Icmp {
-                return None;
+    fn reply_payload(privileged: bool, data: &[u8]) -> Option<&[u8]> {
+        // privileged packet requires decoding ipv4 header
+        if privileged {
+            if let Ok(ipv4_packet) = IpV4Packet::decode(data) {
+                if ipv4_packet.protocol != IpV4Protocol::Icmp {
+                    return None;
+                }
+                if let Ok(reply) = EchoReply::decode::<IcmpV4>(ipv4_packet.data) {
+                    return Some(reply.payload);
+                }
             }
 
-            if let Ok(reply) = EchoReply::decode::<IcmpV4>(ipv4_packet.data) {
-                return Some(reply.payload);
-            }
+            None
+        } else if let Ok(reply) = EchoReply::decode::<IcmpV4>(data) {
+            Some(reply.payload)
+        } else {
+            None
         }
-        None
     }
 }
 
 impl ParseReply for IcmpV6 {
-    fn reply_payload(data: &[u8]) -> Option<&[u8]> {
+    fn reply_payload(_privileged: bool, data: &[u8]) -> Option<&[u8]> {
         if let Ok(reply) = EchoReply::decode::<IcmpV6>(data) {
             return Some(reply.payload);
         }
@@ -437,10 +494,11 @@ impl ParseReply for IcmpV6 {
 }
 
 impl<Proto> Receiver<Proto> {
-    fn new(socket: Socket, state: PingState) -> Self {
+    fn new(privileged: bool, socket: Socket, state: PingState) -> Self {
         Self {
             socket,
             state,
+            privileged,
             _phantom: ::std::marker::PhantomData,
         }
     }
@@ -453,7 +511,7 @@ impl<Message: ParseReply> Future for Receiver<Message> {
         let mut buffer = [0; 2048];
         match self.socket.recv(&mut buffer, cx) {
             Poll::Ready(Ok(bytes)) => {
-                if let Some(payload) = Message::reply_payload(&buffer[..bytes]) {
+                if let Some(payload) = Message::reply_payload(self.privileged, &buffer[..bytes]) {
                     let now = Instant::now();
                     if let Some(sender) = self.state.remove(payload) {
                         sender.send(now).unwrap_or_default()

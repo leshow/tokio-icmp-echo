@@ -34,6 +34,7 @@ impl Proto for IcmpV6 {
     const ECHO_REPLY_CODE: u8 = 0;
 }
 
+#[derive(Debug)]
 pub struct EchoRequest<'a> {
     pub ident: u16,
     pub seq_cnt: u16,
@@ -45,12 +46,10 @@ impl<'a> EchoRequest<'a> {
         buffer[0] = P::ECHO_REQUEST_TYPE;
         buffer[1] = P::ECHO_REQUEST_CODE;
 
-        buffer[4] = (self.ident >> 8) as u8;
-        buffer[5] = self.ident as u8;
-        buffer[6] = (self.seq_cnt >> 8) as u8;
-        buffer[7] = self.seq_cnt as u8;
+        buffer[4..=5].copy_from_slice(&u16::to_be_bytes(self.ident));
+        buffer[6..=7].copy_from_slice(&u16::to_be_bytes(self.seq_cnt));
 
-        if let Err(_) = (&mut buffer[8..]).write(self.payload) {
+        if (&mut buffer[8..]).write(self.payload).is_err() {
             return Err(Error::InvalidSize);
         }
 
@@ -59,6 +58,7 @@ impl<'a> EchoRequest<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct EchoReply<'a> {
     pub ident: u16,
     pub seq_cnt: u16,
@@ -77,9 +77,8 @@ impl<'a> EchoReply<'a> {
             return Err(Error::InvalidPacket);
         }
 
-        let ident = (u16::from(buffer[4]) << 8) + u16::from(buffer[5]);
-        let seq_cnt = (u16::from(buffer[6]) << 8) + u16::from(buffer[7]);
-
+        let ident = u16::from_be_bytes([buffer[4], buffer[5]]);
+        let seq_cnt = u16::from_be_bytes([buffer[6], buffer[7]]);
         let payload = &buffer[HEADER_SIZE..];
 
         Ok(EchoReply {
