@@ -11,6 +11,20 @@ Forked from tokio-icmp-echo, updated to use the `DGRAM` type so that you no long
 
 This fork has minor changes to the repo besides this, but I plan to make larger changes later on
 
+## Privileges
+
+This library attempts to send an "unprivileged" ping. On linux, this may be enabled by default, but if not:
+
+```bash
+sudo sysctl -w net.ipv4.ping_group_range="0   2147483647"
+```
+
+If you'd rather use raw sockets, you can use `Pinger::raw()` and:
+
+```bash
+setcap cap_net_raw=+ep /bin/goping-binary
+```
+
 ## Usage example
 
 You can use `Pinger::dgram()` to use unprivileged ICMP, or `Pinger::raw()` will require privileges.
